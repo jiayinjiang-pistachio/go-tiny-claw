@@ -36,7 +36,7 @@ type ToolCall struct {
 
 // ToolResult 代表工具在本地执行完毕后返回的物理结果
 type ToolResult struct {
-	TooCallID string `json:"tool_call_id"` // 关联的工具调用 ID，必须填写以便模型正确关联上下文
+	ToolCallID string `json:"tool_call_id"` // 关联的工具调用 ID，必须填写以便模型正确关联上下文
 	Output string `json:"output"` // 工具执行的控制台输出或报错堆栈
 	IsError bool `json:"is_error"` // 标记是否失败，供后续的驾驭工程进行错误自愈
 }

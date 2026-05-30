@@ -2,13 +2,18 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"os"
 
 	"github.com/jiayinjiang-pistachio/go-tiny-claw/internal/engine"
+	"github.com/jiayinjiang-pistachio/go-tiny-claw/internal/provider"
 	"github.com/jiayinjiang-pistachio/go-tiny-claw/internal/schema"
+	"github.com/joho/godotenv"
 )
+
+func init() {
+	godotenv.Load() // 加载 .env
+}
 
 // =================================================================
 // 1. 伪造的大模型 Provider
@@ -60,16 +65,27 @@ func (m *mockRegistry) GetAvaliableTools() []schema.ToolDefinition {
 	// 为了让 Phase 2 能检测到工具，这里返回一个伪造的工具定义数组
 	return []schema.ToolDefinition{
 		{
-			Name: "bash",
+			Name: "get_weather",
+			Description: "获取指定城市的当前天气情况",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"city": map[string]interface{}{
+						"type": "string",
+					},
+				},
+				"required": []string{"city"},
+			},
 		},
 	}
 }
 
 func (m *mockRegistry) Execute(ctx context.Context, call schema.ToolCall) schema.ToolResult {
+	log.Printf("[Mock 工具执行] 获取 %s 的天气中...\n", call.Name)
 	return schema.ToolResult{
-		TooCallID: call.ID,
-		Output:    "-rw-r--r-- 1 user group 234 Oct 24 10:00 main.go\n",
-		IsError:   false,
+		ToolCallID: call.ID,
+		Output: "API 返回：今天是晴天，气温 25 度",
+		IsError: false,
 	}
 }
 
@@ -77,19 +93,29 @@ func (m *mockRegistry) Execute(ctx context.Context, call schema.ToolCall) schema
 // 3. 组装运行
 // =================================================================
 func main() {
-	fmt.Println("🚀 欢迎来到 go-tiny-claw 引擎启动序列")
+	// 确保已设置 环境变量
+	if os.Getenv("ZHIPU_API_KEY") == "" {
+		log.Fatal("请先导出 ZHIPU_API_KEY 环境变量")
+	}
 
 	// 获取当前执行目录作为 WorkDir 物理边界
 	workDir, _ := os.Getwd()
 
-	p := &mockProvider{}
-	r := &mockRegistry{}
+	// 1. 初始化真实的 Provider 大脑（指向智谱 GLM-4.5）
+	// 这里可以任意切换 NewZhipuClaudeProvider、NewZhipuOpenAIProvider，效果完全一致
+	llmProvider := provider.NewZhipuClaudeProvider("glm-4.5-air")
 
-	// 实例化核心引擎，开启 EnableThinking 慢思考模式
-	eng := engine.NewAgentEngine(p, r, workDir, true)
+	// 2. 注入伪造的工具注册表
+	registry := &mockRegistry{}
+
+	// 3. 实例化核心引擎，开启 EnableThinking 慢思考模式
+	eng := engine.NewAgentEngine(llmProvider, registry, workDir, false)
+
+	// 设定测试任务
+	prompt := "我想去北京跑步，帮我查查天气合适吗？"
 
 	// 发起任务指令
-	err := eng.Run(context.Background(), "帮我检查当前目录的文件")
+	err := eng.Run(context.Background(), prompt)
 
 	if err != nil {
 		log.Fatalf("引擎奔溃：%v", err)

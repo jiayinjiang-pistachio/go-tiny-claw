@@ -121,7 +121,7 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string) error {
 			// 将工具执行的观察结果（Observation）封装为 UserMessage 追加到上下文中
 			// 注意：ToolCallID 必须携带！这是维系大模型推理链条的关键
 			observationMsg := schema.Message{
-				Role: schema.RoleUser,
+				Role: schema.RoleUser, // 因为工具的执行结果不是由大语言模型调用生成的，所以归为用户message比较合适
 				Content: result.Output,
 				ToolCallID: toolCall.ID,
 			}
