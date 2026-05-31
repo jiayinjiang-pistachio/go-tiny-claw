@@ -41,16 +41,12 @@ func main() {
 	registry.Register(tools.NewEditFileTool(workDir))
 
 	// 3. 实例化核心引擎，开启 EnableThinking 慢思考模式
-	eng := engine.NewAgentEngine(llmProvider, registry, workDir, false)
+	eng := engine.NewAgentEngine(llmProvider, registry, workDir, true)
 
-	// 发起一个需要连贯物理动作的任务
+	// 下发一个需要收集多源信息的任务
 	prompt := `
-	我当前目录有一个 server.go 文件。
-	请帮我把里面“TODO：增加鉴权逻辑”下面的那个 if 语句，整个替换为：
-	if user == nil {
-			fmt.Println("Forbidden!")
-			return
-	}
+	我当前目录下有 a.txt, b.txt, c.txt 三个文件。 
+	为了节省时间，请你同时一次性读取这三个文件，并将它们的内容综合起来，告诉我它们分别记录了什么领域的信息。
 	`
 
 	// 发起任务指令
