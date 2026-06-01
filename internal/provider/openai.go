@@ -18,7 +18,7 @@ type OpenAIProvider struct {
 }
 
 // NewZhipuAIProvider 构造函数，基于 OpenAI v3 SDK，指向智谱底座
-func NewZhipuAIProvider(model string) *OpenAIProvider {
+func NewZhipuOpenAIProvider(model string) *OpenAIProvider {
 	apiKey := os.Getenv("ZHIPU_API_KEY")
 	if apiKey == "" {
 		panic("请设置 ZHIPU_API_KEY 环境变量")
