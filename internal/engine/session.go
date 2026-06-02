@@ -71,6 +71,17 @@ func (s *Session) GetWorkingMemory(limit int) []schema.Message {
 		}
 	}
 
+	// 智谱/Anthropic 要求 system 后必须紧跟 user 消息。
+	// 多轮工具调用后，截断 working memory 可能丢掉最初的用户 prompt，导致首条变成 assistant → 1214。
+	if len(res) > 0 && res[0].Role != schema.RoleUser {
+		for _, m := range s.history {
+			if m.Role == schema.RoleUser && m.ToolCallID == "" {
+				res = append([]schema.Message{m}, res...)
+				break
+			}
+		}
+	}
+
 	return res
 }
 
