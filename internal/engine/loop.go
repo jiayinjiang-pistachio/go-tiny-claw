@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 
+	ctxpkg "github.com/jiayinjiang-pistachio/go-tiny-claw/internal/context" // 引入我们新建的 context 包
 	"github.com/jiayinjiang-pistachio/go-tiny-claw/internal/provider"
 	"github.com/jiayinjiang-pistachio/go-tiny-claw/internal/schema"
 	"github.com/jiayinjiang-pistachio/go-tiny-claw/internal/tools"
@@ -19,7 +20,8 @@ type AgentEngine struct {
 
 	// workDir 工作区：借鉴 OpenClaw 的理念，Agent 必须有一个明确的物理边界
 	workDir        string
-	enableThinking bool // 慢思考模式开关
+	enableThinking bool                   // 慢思考模式开关
+	composer       *ctxpkg.PromptComposer // Prompt 组装器，用于构建动态上下文
 }
 
 func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, enableThinking bool) *AgentEngine {
@@ -27,7 +29,8 @@ func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, en
 		provider:       p,
 		registry:       r,
 		workDir:        workDir,
-		enableThinking: enableThinking, // 使用传入的参数初始化慢思考模式开关
+		enableThinking: enableThinking,                    // 使用传入的参数初始化慢思考模式开关
+		composer:       ctxpkg.NewPromptComposer(workDir), // 初始化组装器
 	}
 }
 
@@ -35,13 +38,13 @@ func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, en
 func (e *AgentEngine) Run(ctx context.Context, userPrompt string, reporter Reporter) error {
 	log.Printf("[Engine]引擎启动，锁定工作区：%s\n", e.workDir)
 
+	// 【核心修改】动态组装 System Prompt，彻底替换以前硬编码的面条提示词
+	systemMsg := e.composer.Build()
+
 	// 1. 初始化会话的 Context（上下文内存）
 	// 在真实的场景中，这里会由动态的 Prompt 组装器加载 AGENTS.md，目前我们先硬编码
 	contextHistory := []schema.Message{
-		{
-			Role:    schema.RoleSystem,
-			Content: "You are go-tiny-claw, an expert coding assistant. ",
-		},
+		systemMsg, // 注入动态组装的内核、AGENTS.md 与 Skills
 		{
 			Role:    schema.RoleUser,
 			Content: userPrompt,
