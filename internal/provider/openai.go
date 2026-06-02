@@ -51,11 +51,11 @@ func (p *OpenAIProvider) Generate(ctx context.Context, msgs []schema.Message, av
 		case schema.RoleAssistant:
 			astParam := openai.ChatCompletionAssistantMessageParam{}
 
-			if msg.Content != "" {
-				astParam.Content = openai.ChatCompletionAssistantMessageParamContentUnion{
-					OfString: openai.String(msg.Content),
-				}
+			// if msg.Content != "" {
+			astParam.Content = openai.ChatCompletionAssistantMessageParamContentUnion{
+				OfString: openai.String(msg.Content),
 			}
+			// }
 
 			// 【重要】如果历史包含 ToolCalls，必须原样放回，以维系大模型的逻辑链
 			if len(msg.ToolCalls) > 0 {

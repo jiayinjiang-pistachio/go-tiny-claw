@@ -20,18 +20,20 @@ type AgentEngine struct {
 
 	// workDir 工作区：借鉴 OpenClaw 的理念，Agent 必须有一个明确的物理边界
 	enableThinking bool                   // 慢思考模式开关
-	composer       *ctxpkg.PromptComposer // Prompt 组装器，用于构建动态上下文
+	PlanMode bool // 暴露给外部的计划模式开关
+	// composer       *ctxpkg.PromptComposer // Prompt 组装器，用于构建动态上下文
 	compactor      *ctxpkg.Compactor      // 上下文压缩器
 }
 
 // 移除 Engine 层的 workDir，因为 workDir 应跟随 Session 走
-func NewAgentEngine(p provider.LLMProvider, r tools.Registry, enableThinking bool) *AgentEngine {
+func NewAgentEngine(p provider.LLMProvider, r tools.Registry, enableThinking bool, planMode bool) *AgentEngine {
 	return &AgentEngine{
 		provider:       p,
 		registry:       r,
 		enableThinking: enableThinking, // 使用传入的参数初始化慢思考模式开关
+		PlanMode: planMode,
 		// 假装这里能获取到 workDir 初始化 Composer，生产环境中应在 Run 中动态构造
-		composer: ctxpkg.NewPromptComposer("."),
+		// composer: ctxpkg.NewPromptComposer("."),
 		// 初始化压缩器：为了便于今天的极端测试，我们将水位线阈值设积极（例如 3000 字符），
 		// 并保护最近的 6 条消息（大约两轮 Turn 交互）
 		compactor: ctxpkg.NewCompactor(3000, 6),
@@ -41,13 +43,13 @@ func NewAgentEngine(p provider.LLMProvider, r tools.Registry, enableThinking boo
 // Run 启动 Agent 的生命周期
 // 移除 userPrompt，改为接收一个具体的 Session 实例
 func (e *AgentEngine) Run(ctx context.Context, session *Session, reporter Reporter) error {
-	log.Printf("[Engine] 唤醒会话 [%s]，锁定工作区：%s\n", session.ID, session.WorkDir)
+	log.Printf("[Engine] 唤醒会话 [%s]，锁定工作区：%s (PlanMode: %v)\n", session.ID, session.WorkDir, e.PlanMode)
 
-	// 根据当前的 Session 工作区，懂他组装最新的 System Prompt
-	e.composer = ctxpkg.NewPromptComposer(session.WorkDir)
+	// 在每次运行前，动态生成组装器并传入当前的 PlanMode 状态
+	composer := ctxpkg.NewPromptComposer(session.WorkDir, e.PlanMode)
 
 	// 【核心修改】动态组装 System Prompt，彻底替换以前硬编码的面条提示词
-	systemMsg := e.composer.Build()
+	systemMsg := composer.Build()
 
 	for {
 		// 获取当前挂载的所有工具定义
