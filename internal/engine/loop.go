@@ -19,50 +19,43 @@ type AgentEngine struct {
 	registry tools.Registry
 
 	// workDir 工作区：借鉴 OpenClaw 的理念，Agent 必须有一个明确的物理边界
-	workDir        string
 	enableThinking bool                   // 慢思考模式开关
 	composer       *ctxpkg.PromptComposer // Prompt 组装器，用于构建动态上下文
 }
 
-func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, enableThinking bool) *AgentEngine {
+// 移除 Engine 层的 workDir，因为 workDir 应跟随 Session 走
+func NewAgentEngine(p provider.LLMProvider, r tools.Registry, enableThinking bool) *AgentEngine {
 	return &AgentEngine{
 		provider:       p,
 		registry:       r,
-		workDir:        workDir,
 		enableThinking: enableThinking,                    // 使用传入的参数初始化慢思考模式开关
-		composer:       ctxpkg.NewPromptComposer(workDir), // 初始化组装器
 	}
 }
 
 // Run 启动 Agent 的生命周期
-func (e *AgentEngine) Run(ctx context.Context, userPrompt string, reporter Reporter) error {
-	log.Printf("[Engine]引擎启动，锁定工作区：%s\n", e.workDir)
+// 移除 userPrompt，改为接收一个具体的 Session 实例
+func (e *AgentEngine) Run(ctx context.Context, session *Session, reporter Reporter) error {
+	log.Printf("[Engine] 唤醒会话 [%s]，锁定工作区：%s\n", session.ID, session.WorkDir)
+
+	// 根据当前的 Session 工作区，懂他组装最新的 System Prompt
+	composer := ctxpkg.NewPromptComposer(session.WorkDir)
 
 	// 【核心修改】动态组装 System Prompt，彻底替换以前硬编码的面条提示词
-	systemMsg := e.composer.Build()
+	systemMsg := composer.Build()
 
-	// 1. 初始化会话的 Context（上下文内存）
-	// 在真实的场景中，这里会由动态的 Prompt 组装器加载 AGENTS.md，目前我们先硬编码
-	contextHistory := []schema.Message{
-		systemMsg, // 注入动态组装的内核、AGENTS.md 与 Skills
-		{
-			Role:    schema.RoleUser,
-			Content: userPrompt,
-		},
-	}
-
-	turnCount := 0
-
-	// 2. the main loop 心跳开始（标准的ReACT循环）
 	for {
-		turnCount++
-
 		// 获取当前挂载的所有工具定义
 		avaliableTools := e.registry.GetAvaliableTools()
 
-		// =========================================================
-		// 1. Phase 1: 慢思考阶段（Thinking）- 剥夺工具，强制规划
-		// =========================================================
+		// 1. 【上下文组装】：SystemPrompt + 截取最近的 6 条消息作为 Working Memory
+		// 在实际业务中，由于工具返回结果可能很长，短期记忆往往设置为 6-10 条足以维系连贯对话
+		workingMemory := session.GetWorkingMemory(6)
+
+		var contextHistory []schema.Message
+		contextHistory = append(contextHistory, systemMsg)
+		contextHistory = append(contextHistory, workingMemory...)
+
+		// 2. ================== Phase 1: Thinking ========================
 		if e.enableThinking {
 			if reporter != nil {
 				// 【触发 Reporter】：开始慢思考
@@ -78,14 +71,14 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string, reporter Repor
 
 			// 如果模型输出了思考过程，我们将其作为 Assistant 消息追加到上下文
 			if thinkResp.Content != "" {
+				// 将思考过程持久化到 session 中
+				session.Append(*thinkResp)
+				// 把它追加到这一轮的临时上下文中，供 Action 阶段使用
 				contextHistory = append(contextHistory, *thinkResp)
 			}
 		}
 
-		// =========================================================
-		// 2. Phase 2: 行动阶段（Action）- 恢复工具，顺着规划执行
-		// =========================================================
-
+		// 3. ================= Phase 2: 行动阶段（Action）===================
 		// 此时的 contextHistory 中已经包含了上一阶段模型自己的 Thinking Trace
 		// 模型会顺着自己的规划逻辑，综合恢复的 avaliableTools，发起精准的工具调用
 		actionResp, err := e.provider.Generate(ctx, contextHistory, avaliableTools)
@@ -93,14 +86,17 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string, reporter Repor
 			return fmt.Errorf("Action 生成失败：%w", err)
 		}
 
+		// 将大模型的响应持久化到 Session 中
+		session.Append(*actionResp)
 		contextHistory = append(contextHistory, *actionResp)
+		
 
-		if reporter != nil {
+		if actionResp.Content != "" && reporter != nil {
 			// 【触发 Reporter】：输出阶段性总结或最终回复
 			// 避免向上游发送仅包含空白字符的消息
 			trimmed := strings.TrimSpace(actionResp.Content)
 			if trimmed != "" {
-				reporter.OnMessage(ctx, trimmed)
+				reporter.OnMessage(ctx, fmt.Sprintf("%s: " + trimmed, session.ID))
 			}
 		}
 
@@ -161,14 +157,12 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string, reporter Repor
 		// 4. Join 阻塞等待：主循环挂起，直到所有的并发协程全部执行完毕
 		wg.Wait()
 
-		// 5. 聚合装填：将并行的结果，按照原本的顺序，一次性追加到上下文时间线中
-		// 这等价于 contextHistory = append(contextHistory, observationMsgs...)
-		for _, obs := range observationMsgs {
-			contextHistory = append(contextHistory, obs)
-		}
+		// 将所有的工具执行结果（Observation）持久化到 Session 中，开启下一轮的复盘与推理
+		session.Append(observationMsgs...)
 
 		// 循环回到开头，模型将带着新加入的 Observation 继续它的下一轮思考...
 	}
 
 	return nil
 }
+
