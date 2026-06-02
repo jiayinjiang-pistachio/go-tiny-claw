@@ -21,6 +21,7 @@ type AgentEngine struct {
 	// workDir 工作区：借鉴 OpenClaw 的理念，Agent 必须有一个明确的物理边界
 	enableThinking bool                   // 慢思考模式开关
 	composer       *ctxpkg.PromptComposer // Prompt 组装器，用于构建动态上下文
+	compactor      *ctxpkg.Compactor      // 上下文压缩器
 }
 
 // 移除 Engine 层的 workDir，因为 workDir 应跟随 Session 走
@@ -28,7 +29,12 @@ func NewAgentEngine(p provider.LLMProvider, r tools.Registry, enableThinking boo
 	return &AgentEngine{
 		provider:       p,
 		registry:       r,
-		enableThinking: enableThinking,                    // 使用传入的参数初始化慢思考模式开关
+		enableThinking: enableThinking, // 使用传入的参数初始化慢思考模式开关
+		// 假装这里能获取到 workDir 初始化 Composer，生产环境中应在 Run 中动态构造
+		composer: ctxpkg.NewPromptComposer("."),
+		// 初始化压缩器：为了便于今天的极端测试，我们将水位线阈值设积极（例如 3000 字符），
+		// 并保护最近的 6 条消息（大约两轮 Turn 交互）
+		compactor: ctxpkg.NewCompactor(3000, 6),
 	}
 }
 
@@ -38,33 +44,37 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, reporter Report
 	log.Printf("[Engine] 唤醒会话 [%s]，锁定工作区：%s\n", session.ID, session.WorkDir)
 
 	// 根据当前的 Session 工作区，懂他组装最新的 System Prompt
-	composer := ctxpkg.NewPromptComposer(session.WorkDir)
+	e.composer = ctxpkg.NewPromptComposer(session.WorkDir)
 
 	// 【核心修改】动态组装 System Prompt，彻底替换以前硬编码的面条提示词
-	systemMsg := composer.Build()
+	systemMsg := e.composer.Build()
 
 	for {
 		// 获取当前挂载的所有工具定义
 		avaliableTools := e.registry.GetAvaliableTools()
 
-		// 1. 【上下文组装】：SystemPrompt + 截取最近的 6 条消息作为 Working Memory
+		// 1. 【上下文组装】：SystemPrompt + 截取最近的 20 条消息作为 Working Memory，给压缩器留下足够的判断空间
 		// 在实际业务中，由于工具返回结果可能很长，短期记忆往往设置为 6-10 条足以维系连贯对话
-		workingMemory := session.GetWorkingMemory(6)
+		workingMemory := session.GetWorkingMemory(20)
 
 		var contextHistory []schema.Message
 		contextHistory = append(contextHistory, systemMsg)
 		contextHistory = append(contextHistory, workingMemory...)
 
-		// 2. ================== Phase 1: Thinking ========================
+		// 2. 在向 Provider 发起推理前，过一遍内存压缩器！
+		// 无论你带出了多少上下文，如果字符数超标，早期日志将被掩码化，超大日志将被掐头去尾
+		compactedContext := e.compactor.Compact(contextHistory)
+
+		// 3. 后续的 Provider.Generate 全面使用被保护过的新鲜上下文（compactedContext）
+		// ================== Phase 1: Thinking ========================
 		if e.enableThinking {
 			if reporter != nil {
 				// 【触发 Reporter】：开始慢思考
 				reporter.OnThinking(ctx)
 			}
-
 			// 核心机制：传入的 avaliableTools 为 nil
 			// 大模型看不到任何 JSON Schema，被迫只能输出纯文本的思考过程
-			thinkResp, err := e.provider.Generate(ctx, contextHistory, nil)
+			thinkResp, err := e.provider.Generate(ctx, compactedContext, nil)
 			if err != nil {
 				return fmt.Errorf("Thinking 生成失败：%w", err)
 			}
@@ -74,29 +84,28 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, reporter Report
 				// 将思考过程持久化到 session 中
 				session.Append(*thinkResp)
 				// 把它追加到这一轮的临时上下文中，供 Action 阶段使用
-				contextHistory = append(contextHistory, *thinkResp)
+				compactedContext = append(compactedContext, *thinkResp)
 			}
 		}
 
-		// 3. ================= Phase 2: 行动阶段（Action）===================
+		//  ================= Phase 2: 行动阶段（Action）===================
 		// 此时的 contextHistory 中已经包含了上一阶段模型自己的 Thinking Trace
 		// 模型会顺着自己的规划逻辑，综合恢复的 avaliableTools，发起精准的工具调用
-		actionResp, err := e.provider.Generate(ctx, contextHistory, avaliableTools)
+		actionResp, err := e.provider.Generate(ctx, compactedContext, avaliableTools)
 		if err != nil {
 			return fmt.Errorf("Action 生成失败：%w", err)
 		}
 
 		// 将大模型的响应持久化到 Session 中
 		session.Append(*actionResp)
-		contextHistory = append(contextHistory, *actionResp)
-		
+		compactedContext = append(compactedContext, *actionResp)
 
 		if actionResp.Content != "" && reporter != nil {
 			// 【触发 Reporter】：输出阶段性总结或最终回复
 			// 避免向上游发送仅包含空白字符的消息
 			trimmed := strings.TrimSpace(actionResp.Content)
 			if trimmed != "" {
-				reporter.OnMessage(ctx, fmt.Sprintf("%s: " + trimmed, session.ID))
+				reporter.OnMessage(ctx, fmt.Sprintf("%s: "+trimmed, session.ID))
 			}
 		}
 
@@ -165,4 +174,3 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, reporter Report
 
 	return nil
 }
-
