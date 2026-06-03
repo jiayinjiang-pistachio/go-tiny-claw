@@ -23,6 +23,7 @@ type AgentEngine struct {
 	PlanMode bool // 暴露给外部的计划模式开关
 	// composer       *ctxpkg.PromptComposer // Prompt 组装器，用于构建动态上下文
 	compactor      *ctxpkg.Compactor      // 上下文压缩器
+	recovery *ctxpkg.RecoveryManager // 错误自愈管理器
 }
 
 // 移除 Engine 层的 workDir，因为 workDir 应跟随 Session 走
@@ -37,6 +38,7 @@ func NewAgentEngine(p provider.LLMProvider, r tools.Registry, enableThinking boo
 		// 初始化压缩器：为了便于今天的极端测试，我们将水位线阈值设积极（例如 3000 字符），
 		// 并保护最近的 6 条消息（大约两轮 Turn 交互）
 		compactor: ctxpkg.NewCompactor(3000, 6),
+		recovery: ctxpkg.NewRecoveryManager(), // 初始化 Recovery
 	}
 }
 
@@ -67,6 +69,8 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, reporter Report
 		// 无论你带出了多少上下文，如果字符数超标，早期日志将被掩码化，超大日志将被掐头去尾
 		compactedContext := e.compactor.Compact(contextHistory)
 
+		var currentTurnThinkingContent string
+
 		// 3. 后续的 Provider.Generate 全面使用被保护过的新鲜上下文（compactedContext）
 		// ================== Phase 1: Thinking ========================
 		if e.enableThinking {
@@ -83,8 +87,9 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, reporter Report
 
 			// 如果模型输出了思考过程，我们将其作为 Assistant 消息追加到上下文
 			if thinkResp.Content != "" {
+				currentTurnThinkingContent = thinkResp.Content
 				// 将思考过程持久化到 session 中
-				session.Append(*thinkResp)
+				// session.Append(*thinkResp)
 				// 把它追加到这一轮的临时上下文中，供 Action 阶段使用
 				compactedContext = append(compactedContext, *thinkResp)
 			}
@@ -98,17 +103,20 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, reporter Report
 			return fmt.Errorf("Action 生成失败：%w", err)
 		}
 
+		// (上一讲修复 1214 的关键代码：合并为合法的单条 Assistant 消息)
+		finalAssistantMsg := schema.Message{
+			Role: schema.RoleAssistant,
+			Content: strings.TrimSpace(currentTurnThinkingContent + "\n" + actionResp.Content),
+			ToolCalls: actionResp.ToolCalls,
+		}
+		session.Append(finalAssistantMsg)
+
 		// 将大模型的响应持久化到 Session 中
-		session.Append(*actionResp)
-		compactedContext = append(compactedContext, *actionResp)
+		// session.Append(*actionResp)
+		// compactedContext = append(compactedContext, *actionResp)
 
 		if actionResp.Content != "" && reporter != nil {
-			// 【触发 Reporter】：输出阶段性总结或最终回复
-			// 避免向上游发送仅包含空白字符的消息
-			trimmed := strings.TrimSpace(actionResp.Content)
-			if trimmed != "" {
-				reporter.OnMessage(ctx, fmt.Sprintf("%s: "+trimmed, session.ID))
-			}
+			reporter.OnMessage(ctx, actionResp.Content)
 		}
 
 		// 3. 退出条件判断
@@ -142,10 +150,20 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, reporter Report
 				// 调用底层 Registry 执行工具（物理操作）
 				result := e.registry.Execute(ctx, call)
 
+				// 【核心拦截与注入】
+				finalOutput := result.Output
+				if result.IsError {
+					// 发生错误，交由 RecoveryManager 诊断并注入“锦囊妙计”
+					finalOutput = e.recovery.AnalyzeAndInject(call.Name, result.Output)
+					log.Printf("  -> [Go-%d] ❌ 注入救援指南：%s\n", idx, finalOutput)
+				} else {
+					log.Printf("  -> [Go-%d] ✅ 工具执行成功（返回 %d 字节）\n", idx, len(result.Output))
+				}
+
 				if reporter != nil {
 					// 为了防止大文件读取导致飞书消息过长被截断，我们仅汇报工具执行状态
 					// 注意：传递给大语言模型的 observationMsgs 依然是完整数据，只是人类看到的 Reporter 市缩略版
-					displayOutput := result.Output
+					displayOutput := finalOutput
 					if len(displayOutput) > 200 {
 						displayOutput = displayOutput[:200] + "...（已截断）"
 					}
@@ -159,7 +177,7 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, reporter Report
 				// 这里不需要加锁（Mutex），性能极高
 				observationMsgs[idx] = schema.Message{
 					Role:       schema.RoleUser,
-					Content:    result.Output,
+					Content:    finalOutput,
 					ToolCallID: call.ID,
 				}
 			}(i, toolCall)
