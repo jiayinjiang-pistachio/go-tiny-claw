@@ -19,11 +19,12 @@ type AgentEngine struct {
 	registry tools.Registry
 
 	// workDir 工作区：借鉴 OpenClaw 的理念，Agent 必须有一个明确的物理边界
-	enableThinking bool                   // 慢思考模式开关
-	PlanMode bool // 暴露给外部的计划模式开关
+	enableThinking bool // 慢思考模式开关
+	PlanMode       bool // 暴露给外部的计划模式开关
 	// composer       *ctxpkg.PromptComposer // Prompt 组装器，用于构建动态上下文
-	compactor      *ctxpkg.Compactor      // 上下文压缩器
-	recovery *ctxpkg.RecoveryManager // 错误自愈管理器
+	compactor *ctxpkg.Compactor       // 上下文压缩器
+	recovery  *ctxpkg.RecoveryManager // 错误自愈管理器
+	injector    *ReminderInjector       // 提醒注入器
 }
 
 // 移除 Engine 层的 workDir，因为 workDir 应跟随 Session 走
@@ -32,13 +33,14 @@ func NewAgentEngine(p provider.LLMProvider, r tools.Registry, enableThinking boo
 		provider:       p,
 		registry:       r,
 		enableThinking: enableThinking, // 使用传入的参数初始化慢思考模式开关
-		PlanMode: planMode,
+		PlanMode:       planMode,
 		// 假装这里能获取到 workDir 初始化 Composer，生产环境中应在 Run 中动态构造
 		// composer: ctxpkg.NewPromptComposer("."),
 		// 初始化压缩器：为了便于今天的极端测试，我们将水位线阈值设积极（例如 3000 字符），
 		// 并保护最近的 6 条消息（大约两轮 Turn 交互）
 		compactor: ctxpkg.NewCompactor(3000, 6),
-		recovery: ctxpkg.NewRecoveryManager(), // 初始化 Recovery
+		recovery:  ctxpkg.NewRecoveryManager(), // 初始化 Recovery
+		injector: NewReminderInjector(), // 初始化注入器
 	}
 }
 
@@ -105,8 +107,8 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, reporter Report
 
 		// (上一讲修复 1214 的关键代码：合并为合法的单条 Assistant 消息)
 		finalAssistantMsg := schema.Message{
-			Role: schema.RoleAssistant,
-			Content: strings.TrimSpace(currentTurnThinkingContent + "\n" + actionResp.Content),
+			Role:      schema.RoleAssistant,
+			Content:   strings.TrimSpace(currentTurnThinkingContent + "\n" + actionResp.Content),
 			ToolCalls: actionResp.ToolCalls,
 		}
 		session.Append(finalAssistantMsg)
@@ -133,6 +135,10 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, reporter Report
 
 		// 2. 声明 WaitGroup 用于阻塞等待所有协程完成
 		var wg sync.WaitGroup
+
+		// 用于收集本轮执行的最后一个工具，供 Reminder 探测器分析
+		var lastToolCall schema.ToolCall
+		var lastToolResult schema.ToolResult
 
 		// 3. 遍历模型请求的所有工具，为每一个工具单独 Fork 出一个 Goroutine
 		for i, toolCall := range actionResp.ToolCalls {
@@ -180,14 +186,29 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, reporter Report
 					Content:    finalOutput,
 					ToolCallID: call.ID,
 				}
+
+				// 捕获状态供外部探测器使用
+				if idx == 0 {
+					lastToolCall = call
+					lastToolResult = result
+				}
 			}(i, toolCall)
 		}
 
 		// 4. Join 阻塞等待：主循环挂起，直到所有的并发协程全部执行完毕
 		wg.Wait()
 
+		// 1. 先将普通的工具执行结果存入 Session
 		// 将所有的工具执行结果（Observation）持久化到 Session 中，开启下一轮的复盘与推理
 		session.Append(observationMsgs...)
+
+		// 2. 【核心防线】：在准备进入下一轮之前，进行死循环探测
+		reminderMsg := e.injector.CheckAndInject(lastToolCall, lastToolResult)
+		if reminderMsg != nil {
+			// 如果触发了干预探测，将这严厉的提醒作为 User 消息，强制追加到 Session 的最末尾！
+			// 大模型在下一轮被唤醒时，第一眼就会看到这句话，从而打破布局执念。
+			session.Append(*reminderMsg)
+		}
 
 		// 循环回到开头，模型将带着新加入的 Observation 继续它的下一轮思考...
 	}
