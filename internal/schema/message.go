@@ -11,6 +11,12 @@ const (
 	RoleAssistant Role = "assistant" // 模型的输出：包含推理（Reasoning）、或工具调用（ToolCall）
 )
 
+type Usege struct {
+	PromptTokens int `json:"prompt_tokens"` // 输入的 token 数量
+	CompletionTokens int `json:"completion_tokens"` // 产生的 token 数量
+}
+
+
 // Message 代表上下文中传递的单条消息
 type Message struct {
 	Role Role `json:"role"` // 消息的角色
@@ -20,6 +26,9 @@ type Message struct {
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"` // omitempty 作用： 如果 ToolCalls 是 nil 或者长度为 0 的空切片 []ToolCall{}，生成的 JSON 中不会包含 "tool_calls" 这个键。
 	// 如果这是对某个工具调用的响应，此字段必须填写，以告知模型上下文的关联性
 	ToolCallID string `json:"tool_call_id,omitempty"` // 仅当 Role 是 assistant 且 Content 是推理时，才会有这个字段
+
+	// 如果这是大模型（Assistant）的回复，此字段存放本次调用的 token 消耗
+	Usage *Usege `json:"usage,omitempty"`
 }
 
 // ToolCall 代表模型请求调用某个具体的工具
@@ -50,5 +59,3 @@ type ToolDefinition struct {
 	// 只有当你需要在后端主动校验 Schema 合法性，或者动态修改 Schema 内容时，才考虑解析它。
 	InputSchema interface{} `json:"input_schema"` // 工具参数的 JSON Schema 定义，供模型构造正确的调用参数
 }
-
-

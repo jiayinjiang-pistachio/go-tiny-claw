@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/jiayinjiang-pistachio/go-tiny-claw/internal/engine"
+	"github.com/jiayinjiang-pistachio/go-tiny-claw/internal/observability"
 	"github.com/jiayinjiang-pistachio/go-tiny-claw/internal/provider"
 	"github.com/jiayinjiang-pistachio/go-tiny-claw/internal/schema"
 	"github.com/jiayinjiang-pistachio/go-tiny-claw/internal/tools"
@@ -37,46 +38,53 @@ func main() {
 	// 1. 初始化引擎依赖
 	workDir, _ := os.Getwd()
 	workDir += "/workspace"
+	modelName := "glm-4.5-air"
 
 	// 2. 初始化真实的 Provider 大脑（指向智谱 GLM-4.5）
 	// 这里可以任意切换 NewZhipuClaudeProvider、NewZhipuOpenAIProvider，效果完全一致
-	llmProvider := provider.NewZhipuClaudeProvider("glm-4.5-air")
-	// 注入新实现的终端输出器
-	reporter := engine.NewTerminalReporter()
+	llmProvider := provider.NewZhipuClaudeProvider(modelName)
 
-	// 【防御沙箱】为子智能体准备受限的只读注册表
-	readOnlyRegistry := tools.NewRegistry()
+	// // 注入新实现的终端输出器
+	// reporter := engine.NewTerminalReporter()
 
-	// 将真实的工具挂载到注册表中
-	readOnlyRegistry.Register(tools.NewReadFileTool(workDir))
-	readOnlyRegistry.Register(tools.NewBashTool(workDir))
+	// // 【防御沙箱】为子智能体准备受限的只读注册表
+	// readOnlyRegistry := tools.NewRegistry()
 
-	// 为主智能体准备全功能注册表
-	// 2. 初始化真实的 Tool Registry
-	mainRegistry := tools.NewRegistry()
+	// // 将真实的工具挂载到注册表中
+	// readOnlyRegistry.Register(tools.NewReadFileTool(workDir))
+	// readOnlyRegistry.Register(tools.NewBashTool(workDir))
 
-	// 将真实的工具挂载到注册表中
-	mainRegistry.Register(tools.NewReadFileTool(workDir))
-	mainRegistry.Register(tools.NewWriteFileTool(workDir))
-	mainRegistry.Register(tools.NewBashTool(workDir))
-	mainRegistry.Register(tools.NewEditFileTool(workDir))
+	// // 为主智能体准备全功能注册表
+	// // 2. 初始化真实的 Tool Registry
+	// mainRegistry := tools.NewRegistry()
 
-	// 3. 实例化核心引擎，开启 EnableThinking 慢思考模式、开启计划模式 (PlanMode=true)
-	eng := engine.NewAgentEngine(llmProvider, mainRegistry, false, false)
+	// // 将真实的工具挂载到注册表中
+	// mainRegistry.Register(tools.NewReadFileTool(workDir))
+	// mainRegistry.Register(tools.NewWriteFileTool(workDir))
+	// mainRegistry.Register(tools.NewBashTool(workDir))
+	// mainRegistry.Register(tools.NewEditFileTool(workDir))
 
-	// 【核心装配】：将带有 Engine 引用和只读 Registry 的 Subagent 工具注册进主线
-	mainRegistry.Register(tools.NewSubAgentTool(eng, readOnlyRegistry, reporter))
+	// // 3. 实例化核心引擎，开启 EnableThinking 慢思考模式、开启计划模式 (PlanMode=true)
+	// eng := engine.NewAgentEngine(llmProvider, mainRegistry, false, false)
 
-	sessionID := "test_subagent_001"
+	// // 【核心装配】：将带有 Engine 引用和只读 Registry 的 Subagent 工具注册进主线
+	// mainRegistry.Register(tools.NewSubAgentTool(eng, readOnlyRegistry, reporter))
+
+	sessionID := "test_observability_001"
 	sess := engine.GlobalSessionMgr.GetOrCreate(sessionID, workDir)
 
-	prompt := ` 我需要你在这个遗留项目里，找到那个“核心密码”。
-	为了防止污染主上下文，请你务必派出子智能体（spawn_subagent）去执行探索任务。
-	你可以让子智能体使用 bash 去查找当前目录（及其所有子目录）下名为 config.txt 的文件。
-	子智能体拿到密码向你汇报后，请你亲自使用 write_file 工具，将密码写在根目录的 answer.txt 里。
-	`
+	trackerProvider := observability.NewCostTracker(llmProvider, modelName, sess)
 
-	log.Println("\n>>> 🚀 启动多智能体协同测试...") 
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewBashTool(workDir))
+
+	// 将包裹的 provider 注入给 Engine(Engine 毫不知情)
+	eng := engine.NewAgentEngine(trackerProvider, registry, false, false)
+	reporter := engine.NewTerminalReporter()
+
+	prompt := `请用 bash 帮我用 date 命令查一下现在的时间。`
+
+	log.Println("\n>>> 🚀 启动带仪表盘的可观测性测试...")
 	sess.Append(schema.Message{Role: schema.RoleUser, Content: prompt})
 
 	// 	// 这是一个巨大的陷阱指令：
@@ -138,6 +146,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("引擎运行崩溃: %v", err)
 	}
+
+	log.Printf("\n================ 财务报表 ================\n") 
+	log.Printf("会话 ID: %s\n", sess.ID) 
+	log.Printf("总消耗 Input Tokens: %d\n", sess.TotalPromptTokens) 
+	log.Printf("总消耗 Output Tokens: %d\n", sess.TotalCompletionTokens)
+	 log.Printf("总计费用 (CNY): ¥%.6f\n", sess.TotalCostCNY) 
+	 log.Printf("==========================================\n")
 
 	// log.Println("架构蓝图搭建完毕，等待各核心模块注入！")
 }
